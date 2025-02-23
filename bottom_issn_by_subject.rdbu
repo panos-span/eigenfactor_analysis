@@ -1,0 +1,39 @@
+BEGIN SETUP
+
+# Expanded eigenfactor_scores data to provide a larger dataset for each subject
+eigenfactor_scores:
+issn    subject    eigenfactor_score
+ip1     CS         1.2
+ip2     CS         1.4
+ip3     CS         1.6
+ip4     CS         1.8
+ip5     CS         2.0
+ip6     CS         2.3
+ip7     CS         2.5
+ip8     Physics    0.9
+ip9     Physics    1.1
+ip10    Physics    1.3
+ip11    Physics    1.5
+ip12    Physics    1.7
+ip13    Physics    1.9
+ip14    Biology    0.7
+ip15    Biology    0.9
+ip16    Biology    1.1
+ip17    Biology    1.3
+ip18    Biology    1.5
+ip19    Biology    1.7
+
+END
+
+INCLUDE CREATE bottom_issn_by_subject.sql
+
+BEGIN RESULT
+bottom_issn_by_subject:
+issn    subject
+ip1     CS
+ip2     CS
+ip8     Physics
+ip9     Physics
+ip14    Biology
+ip15    Biology
+END

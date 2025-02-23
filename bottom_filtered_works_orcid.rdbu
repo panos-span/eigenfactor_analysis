@@ -1,0 +1,30 @@
+BEGIN SETUP
+
+rolap.works_orcid:
+id doi	orcid
+1 d1	o1.1
+1 d1	o1.2
+2 d2	o1.2
+
+rolap.works_issn_subject:
+doi	issn subject
+d1	ip1  id1
+d2	ip2  id2
+d3	ie3  id3
+
+rolap.bottom_issn_by_subject:
+issn subject
+ip1   id1
+ip2   id2
+
+END
+
+INCLUDE CREATE bottom_filtered_works_orcid.sql
+
+BEGIN RESULT
+bottom_filtered_works_orcid:
+id doi orcid   subject
+1 d1  o1.1    id1
+1 d1  o1.2    id1
+2 d2  o1.2    id2
+END

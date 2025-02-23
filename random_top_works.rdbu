@@ -1,0 +1,32 @@
+BEGIN SETUP
+
+# Sample data for random_author_works with works by random authors, their DOIs, h5_index, and subjects
+rolap.random_author_works:
+id    doi   h5_index   subject
+r1    d1    10         CS
+r2    d2    8          CS
+r3    d3    12         Physics
+r4    d4    15         Physics
+r5    d5    7          Biology
+
+# Sample data for work_citations to provide citations_number for each DOI
+rolap.work_citations:
+doi   citations_number
+d1    12
+d2    9
+d3    11
+d4    16
+d5    8
+
+END
+
+INCLUDE CREATE random_top_works.sql
+
+BEGIN RESULT
+random_top_works:
+id    citations_number   subject
+r1    12                CS
+r2    9                 CS
+r4    16                Physics
+r5    8                 Biology
+END

@@ -1,0 +1,33 @@
+BEGIN SETUP
+
+# Sample data for works_orcid to link DOIs to ORCIDs
+rolap.works_orcid:
+doi   orcid
+d1    o1
+d2    o1
+d3    o2
+d4    o2
+d5    o3
+d6    o3
+
+# Sample data for work_citations to provide citation counts for each DOI
+rolap.work_citations:
+doi   citations_number
+d1    10
+d2    8
+d3    12
+d4    5
+d5    7
+d6    4
+
+END
+
+INCLUDE CREATE orcid_h5.sql
+
+BEGIN RESULT
+orcid_h5:
+orcid   h5_index
+o1      2
+o2      2
+o3      2
+END

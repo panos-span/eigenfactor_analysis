@@ -1,0 +1,43 @@
+BEGIN SETUP
+
+# Sample data for works_issn_subject to link DOIs to subjects and ISSNs
+rolap.works_issn_subject:
+doi   subject   issn
+d1    CS        issn1
+d2    CS        issn1
+d3    Physics   issn2
+d4    Physics   issn2
+d5    Biology   issn3
+d6    Biology   issn3
+
+# Sample data for works_orcid to link DOIs to ORCIDs
+rolap.works_orcid:
+doi   orcid
+d1    o1
+d2    o1
+d3    o2
+d4    o2
+d5    o3
+d6    o3
+
+# Sample data for work_citations to provide citation counts for each DOI
+rolap.work_citations:
+doi   citations_number
+d1    10
+d2    8
+d3    12
+d4    5
+d5    7
+d6    4
+
+END
+
+INCLUDE CREATE orcid_h5_subject.sql
+
+BEGIN RESULT
+orcid_h5_subject:
+orcid   subject   h5_index
+o1      CS        2
+o2      Physics   2
+o3      Biology   2
+END
