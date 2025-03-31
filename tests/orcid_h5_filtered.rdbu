@@ -1,0 +1,35 @@
+BEGIN SETUP
+
+# o1 is bound by publications (1)
+# o2 is bound by citations (2)
+# o3 is bound by both (2)
+
+rolap.work_citations:
+doi	citations_number
+d1  15
+d2  10
+d3  5
+d4  8
+
+rolap.filtered_works_orcid:
+doi	orcid  subject
+d1	o1      CS      
+d2	o1      CS
+d3	o2      Physics
+d4	o2      Physics
+
+rolap.avg_hindex_by_subject:
+subject avg_h5_index
+CS  10.5
+Physics 8.3
+
+END
+
+INCLUDE CREATE orcid_h5_filtered.sql
+
+BEGIN RESULT
+orcid_h5_filtered:
+orcid	subject	h5_index	avg_subject_h5_index	adjusted_h5_index
+o1	CS	2	10.5	0.19
+o2	Physics	2	8.3	0.241
+END

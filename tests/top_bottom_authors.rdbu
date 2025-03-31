@@ -1,0 +1,44 @@
+BEGIN SETUP
+
+# Sample data for orcid_h5_bottom to simulate h5_index rankings for authors within subjects
+rolap.orcid_h5_bottom:
+orcid   h5_index   subject
+o1      15         CS
+o2      14         CS
+o3      13         CS
+o4      12         CS
+o5      11         CS
+o6      20         Physics
+o7      19         Physics
+o8      18         Physics
+o9      17         Physics
+o10     16         Physics
+o11     25         Biology
+o12     24         Biology
+o13     23         Biology
+o14     22         Biology
+o15     21         Biology
+
+END
+
+INCLUDE CREATE top_bottom_authors.sql
+
+BEGIN RESULT
+top_bottom_authors:
+orcid   h5_index   subject
+o1      15         CS
+o2      14         CS
+o3      13         CS
+o4      12         CS
+o5      11         CS
+o6      20         Physics
+o7      19         Physics
+o8      18         Physics
+o9      17         Physics
+o10     16         Physics
+o11     25         Biology
+o12     24         Biology
+o13     23         Biology
+o14     22         Biology
+o15     21         Biology
+END
