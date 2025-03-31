@@ -6,4 +6,4 @@ CREATE TABLE rolap.top_issn_by_subject AS
                  subject,
                  PERCENT_RANK() OVER (PARTITION BY subject ORDER BY eigenfactor_score DESC) AS issn_percentile_rank
           FROM eigenfactor_scores) ranked_issns
-    WHERE issn_percentile_rank <= 0.2;
+    WHERE issn_percentile_rank <= 0.25;

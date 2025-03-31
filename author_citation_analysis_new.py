@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
 Citation Network Analysis for Detecting Citation Cliques
@@ -43,7 +43,7 @@ CITATION_RING_MAX_SIZE = 12  # Maximum size of citation rings
 CITATION_RING_MIN_BAD_FRACTION = 0.6  # Minimum fraction of bad authors in ring
 
 # Output directory
-OUTPUT_DIR = Path("output_new_bad_0.1_limited")
+OUTPUT_DIR = Path("output_new_bad_0.2_temporal")
 
 
 ##############################################################################
@@ -184,12 +184,12 @@ def load_bad_authors(rolap_conn, schema):
     return bad_authors
 
 
-def load_publication_years(rolap_conn, schema):
+def load_publication_years(impact_conn, schema):
     """
-    Load publication years for works.
+    Load publication years for works from the impact database.
     
     Args:
-        rolap_conn: SQLite connection to ROLAP database
+        impact_conn: SQLite connection to IMPACT database
         schema: Database schema information
         
     Returns:
@@ -197,13 +197,13 @@ def load_publication_years(rolap_conn, schema):
     """
     publication_years = {}
     
-    if schema['rolap'].get('has_works', False):
-        works_columns = schema['rolap'].get('works_columns', [])
+    if schema['impact'].get('has_works', False):
+        works_columns = schema['impact'].get('works_columns', [])
         
         # Check if year column exists
         if 'year' in works_columns:
             try:
-                cursor = rolap_conn.cursor()
+                cursor = impact_conn.cursor()
                 cursor.execute("SELECT id, year FROM works WHERE year IS NOT NULL")
                 for work_id, year in cursor.fetchall():
                     try:
@@ -213,13 +213,13 @@ def load_publication_years(rolap_conn, schema):
                         # Skip if year cannot be parsed
                         continue
                 cursor.close()
-                print(f"[INFO] Loaded {len(publication_years)} publication years.")
+                print(f"[INFO] Loaded {len(publication_years)} publication years from impact database.")
             except sqlite3.OperationalError as e:
-                print(f"[WARNING] Could not load publication years: {e}")
+                print(f"[WARNING] Could not load publication years from impact database: {e}")
         else:
-            print("[WARNING] 'year' column not found in works table.")
+            print("[WARNING] 'year' column not found in works table in impact database.")
     else:
-        print("[WARNING] works table not found. No publication years loaded.")
+        print("[WARNING] works table not found in impact database. No publication years loaded.")
     
     return publication_years
 
@@ -1885,6 +1885,397 @@ def save_comparative_analysis(results, output_path):
     except Exception as e:
         print(f"[WARNING] Could not save comparative analysis: {e}")
         
+##############################################################################
+# 9) Statistical Analysis Functions
+##############################################################################
+def perform_network_permutation_test(G_bottom, G_random, statistic_func, n_permutations=1000):
+    """
+    Perform a permutation test to compare a network statistic between two graphs.
+    
+    Parameters:
+    -----------
+    G_bottom : networkx.Graph
+        The citation network of bottom authors
+    G_random : networkx.Graph
+        The citation network of random authors
+    statistic_func : function
+        Function that calculates the desired statistic on a graph (e.g., clustering)
+    n_permutations : int
+        Number of permutations to perform
+    
+    Returns:
+    --------
+    p_value : float
+        The p-value from the permutation test
+    observed_diff : float
+        The observed difference in the statistic between groups
+    """
+    import random
+    
+    # Calculate observed statistic difference
+    bottom_stat = statistic_func(G_bottom)
+    random_stat = statistic_func(G_random)
+    observed_diff = bottom_stat - random_stat
+    
+    # Combine all nodes 
+    all_nodes = list(set(G_bottom.nodes()).union(set(G_random.nodes())))
+    
+    # Calculate permutation distribution
+    permutation_diffs = []
+    for _ in range(n_permutations):
+        # Randomly assign nodes to two groups
+        random.shuffle(all_nodes)
+        split_point = len(G_bottom.nodes())
+        perm_bottom_nodes = all_nodes[:split_point]
+        perm_random_nodes = all_nodes[split_point:]
+        
+        # Create subgraphs based on random assignment
+        perm_bottom = nx.Graph()
+        perm_random = nx.Graph()
+        
+        # Add edges if both endpoints are in the respective group
+        for u, v in G_bottom.edges():
+            if u in perm_bottom_nodes and v in perm_bottom_nodes:
+                perm_bottom.add_edge(u, v)
+        
+        for u, v in G_random.edges():
+            if u in perm_random_nodes and v in perm_random_nodes:
+                perm_random.add_edge(u, v)
+        
+        # Calculate statistic difference
+        perm_bottom_stat = statistic_func(perm_bottom)
+        perm_random_stat = statistic_func(perm_random)
+        perm_diff = perm_bottom_stat - perm_random_stat
+        permutation_diffs.append(perm_diff)
+    
+    # Calculate two-sided p-value
+    p_value = sum(1 for d in permutation_diffs if abs(d) >= abs(observed_diff)) / n_permutations
+    
+    return p_value, observed_diff
+
+
+##############################################################################
+# Statistical Helper Functions
+##############################################################################
+
+def bootstrap_citation_pattern(counts, n_bootstrap=1000, confidence=0.95):
+    """
+    Calculate bootstrap confidence intervals for citation pattern counts.
+    
+    Args:
+        counts: Dictionary with 'bottom' and 'random' lists of counts
+        n_bootstrap: Number of bootstrap samples
+        confidence: Confidence level (default 0.95 for 95% CI)
+    
+    Returns:
+        tuple: (bottom_ci, random_ci, is_significant)
+    """
+    import numpy as np
+    
+    bottom_counts = np.array(counts['bottom'])
+    random_counts = np.array(counts['random'])
+    
+    # Bootstrap bottom authors
+    bottom_means = []
+    for _ in range(n_bootstrap):
+        sample = np.random.choice(bottom_counts, size=len(bottom_counts), replace=True)
+        bottom_means.append(np.mean(sample))
+    
+    # Bootstrap random authors
+    random_means = []
+    for _ in range(n_bootstrap):
+        sample = np.random.choice(random_counts, size=len(random_counts), replace=True)
+        random_means.append(np.mean(sample))
+    
+    # Calculate confidence intervals
+    alpha = (1 - confidence) / 2
+    bottom_ci = (np.percentile(bottom_means, 100 * alpha), 
+                np.percentile(bottom_means, 100 * (1 - alpha)))
+    random_ci = (np.percentile(random_means, 100 * alpha), 
+                np.percentile(random_means, 100 * (1 - alpha)))
+    
+    # Check if CIs overlap
+    is_significant = not (bottom_ci[0] <= random_ci[1] and random_ci[0] <= bottom_ci[1])
+    
+    return bottom_ci, random_ci, is_significant
+
+def compare_pattern_properties(bottom_props, random_props):
+    """
+    Run Mann-Whitney U tests on pattern properties.
+    
+    Args:
+        bottom_props: Dictionary of property values for bottom authors
+        random_props: Dictionary of property values for random authors
+    
+    Returns:
+        dict: Test results for each property
+    """
+    from scipy.stats import mannwhitneyu
+    import numpy as np
+    
+    results = {}
+    for prop in bottom_props:
+        if bottom_props[prop] and random_props[prop]:  # Non-empty lists
+            try:
+                u_stat, p_value = mannwhitneyu(bottom_props[prop], random_props[prop])
+                
+                # Calculate effect size (r)
+                n1 = len(bottom_props[prop])
+                n2 = len(random_props[prop])
+                effect_size = u_stat / (n1 * n2)  # Normalized U statistic
+                
+                results[prop] = {
+                    'u_statistic': u_stat,
+                    'p_value': p_value,
+                    'effect_size': effect_size,
+                    'bottom_median': np.median(bottom_props[prop]),
+                    'random_median': np.median(random_props[prop]),
+                    'significant': p_value < 0.05
+                }
+            except Exception as e:
+                results[prop] = {'error': str(e)}
+    
+    return results
+
+def self_citation_analysis(bottom_authors, random_authors, combined_graph):
+    """
+    Analyze self-citation patterns between bottom and random authors.
+    
+    Args:
+        bottom_authors: List of bottom author IDs
+        random_authors: List of random author IDs
+        combined_graph: Combined citation network graph
+    
+    Returns:
+        dict: Self-citation metrics and test results
+    """
+    import numpy as np
+    from scipy.stats import mannwhitneyu
+    
+    # Calculate self-citation rates for each author
+    bottom_self_citation_rates = []
+    random_self_citation_rates = []
+    
+    # Bottom authors
+    for author in bottom_authors:
+        if author in combined_graph:
+            all_citations = combined_graph.out_degree(author) or 1  # Avoid division by zero
+            # Count self-loops
+            self_citations = 1 if combined_graph.has_edge(author, author) else 0
+            rate = self_citations / all_citations
+            bottom_self_citation_rates.append(rate)
+    
+    # Random authors
+    for author in random_authors:
+        if author in combined_graph:
+            all_citations = combined_graph.out_degree(author) or 1  # Avoid division by zero
+            # Count self-loops
+            self_citations = 1 if combined_graph.has_edge(author, author) else 0
+            rate = self_citations / all_citations
+            random_self_citation_rates.append(rate)
+    
+    # Run Mann-Whitney U test
+    try:
+        u_stat, p_value = mannwhitneyu(bottom_self_citation_rates, random_self_citation_rates)
+        
+        return {
+            'bottom_median_rate': np.median(bottom_self_citation_rates) if bottom_self_citation_rates else None,
+            'random_median_rate': np.median(random_self_citation_rates) if random_self_citation_rates else None,
+            'u_statistic': u_stat,
+            'p_value': p_value,
+            'significant': p_value < 0.05
+        }
+    except Exception as e:
+        return {'error': str(e)}
+
+def citation_exchange_analysis(graph, bad_authors):
+    """
+    Analyze citation exchange patterns between bad authors.
+    
+    Args:
+        graph: Combined citation network
+        bad_authors: Set of bad author IDs
+    
+    Returns:
+        dict: Citation exchange metrics
+    """
+    # Create subgraph of only bad authors
+    bad_subgraph = graph.subgraph(list(bad_authors & set(graph.nodes())))
+    
+    # Calculate reciprocity in bad author subgraph
+    try:
+        bad_reciprocity = nx.reciprocity(bad_subgraph)
+    except:
+        bad_reciprocity = 0
+    
+    # Create random subgraph of the same size for comparison
+    import random
+    non_bad_authors = list(set(graph.nodes()) - bad_authors)
+    
+    if len(non_bad_authors) >= len(bad_authors):
+        random_sample = random.sample(non_bad_authors, len(bad_authors))
+        random_subgraph = graph.subgraph(random_sample)
+        
+        try:
+            random_reciprocity = nx.reciprocity(random_subgraph)
+        except:
+            random_reciprocity = 0
+            
+        exchange_ratio = bad_reciprocity / random_reciprocity if random_reciprocity > 0 else float('inf')
+        
+        return {
+            'bad_reciprocity': bad_reciprocity,
+            'random_reciprocity': random_reciprocity,
+            'exchange_ratio': exchange_ratio,
+            'significant': exchange_ratio > 2.0  # Arbitrary threshold
+        }
+    else:
+        return {
+            'bad_reciprocity': bad_reciprocity,
+            'error': 'Not enough non-bad authors for comparison'
+        }
+
+def perform_network_permutation_test(graph1, graph2, metric_func, n_permutations=1000):
+    """
+    Perform a permutation test on network metrics.
+    
+    Args:
+        graph1, graph2: NetworkX graphs to compare
+        metric_func: Function that calculates metric on a graph
+        n_permutations: Number of permutations
+    
+    Returns:
+        tuple: (p_value, observed_difference)
+    """
+    import numpy as np
+    import random
+    
+    # Calculate observed metric difference
+    metric1 = metric_func(graph1)
+    metric2 = metric_func(graph2)
+    observed_diff = metric1 - metric2
+    
+    # Combine nodes and randomly reassign
+    combined_nodes = list(set(graph1.nodes()) | set(graph2.nodes()))
+    
+    # Count how many permutations exceed observed difference
+    exceed_count = 0
+    
+    for _ in range(n_permutations):
+        # Shuffle nodes
+        random.shuffle(combined_nodes)
+        split_point = len(graph1.nodes())
+        
+        # Create permuted graphs (of same size as originals)
+        perm_nodes1 = combined_nodes[:split_point]
+        perm_nodes2 = combined_nodes[split_point:split_point+len(graph2.nodes())]
+        
+        perm_graph1 = graph1.subgraph(perm_nodes1)
+        perm_graph2 = graph2.subgraph(perm_nodes2)
+        
+        # Calculate metrics on permuted graphs
+        perm_metric1 = metric_func(perm_graph1)
+        perm_metric2 = metric_func(perm_graph2)
+        perm_diff = perm_metric1 - perm_metric2
+        
+        if abs(perm_diff) >= abs(observed_diff):
+            exceed_count += 1
+    
+    # Calculate p-value
+    p_value = exceed_count / n_permutations
+    
+    return p_value, observed_diff
+
+def analyze_ring_temporal_patterns(results, citation_years):
+    """
+    Analyze temporal patterns in citation rings by reading from saved CSV files.
+    
+    Args:
+        results: List of analysis results
+        citation_years: Dictionary of citation years
+    
+    Returns:
+        dict: Temporal analysis metrics
+    """
+    import numpy as np
+    import csv
+    from pathlib import Path
+    
+    # Initialize lists to store temporal metrics
+    year_ranges = []
+    year_stds = []
+    
+    # Iterate through all results to find the files
+    for result in results:
+        bottom_author = result["bottom_author"]
+        pair_idx = result["pair_idx"]
+        
+        # Try to read the ring data from the saved CSV
+        ring_file = Path(f"{OUTPUT_DIR}/pair{pair_idx}_BOTTOM_{bottom_author}_citation_rings.csv")
+        
+        if ring_file.exists():
+            try:
+                with open(ring_file, 'r', newline='') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        # Extract temporal data if available
+                        if 'year_range' in row and row['year_range']:
+                            try:
+                                year_range = float(row['year_range'])
+                                year_ranges.append(year_range)
+                            except (ValueError, TypeError):
+                                pass
+                        
+                        if 'year_std' in row and row['year_std']:
+                            try:
+                                year_std = float(row['year_std'])
+                                year_stds.append(year_std)
+                            except (ValueError, TypeError):
+                                pass
+            except Exception as e:
+                print(f"[WARNING] Could not read ring file {ring_file}: {e}")
+    
+    # Calculate metrics if we have temporal data
+    if year_ranges:
+        return {
+            'median_year_range': np.median(year_ranges),
+            'mean_year_range': np.mean(year_ranges),
+            'median_year_std': np.median(year_stds) if year_stds else None,
+            'compact_rings_pct': sum(1 for yr in year_ranges if yr <= 2) / len(year_ranges) * 100
+        }
+    else:
+        return {'error': 'No temporal data available'}
+
+def save_statistical_results(results, output_path):
+    """
+    Save statistical analysis results to CSV.
+    
+    Args:
+        results: Dictionary of statistical test results
+        output_path: Path to save CSV file
+    """
+    with open(output_path, 'w', newline='') as f:
+        import csv
+        writer = csv.writer(f)
+        writer.writerow(['Test', 'Metric', 'Value', 'Significant'])
+        
+        # Write flattened results
+        for test_name, test_results in results.items():
+            if isinstance(test_results, dict):
+                for metric, value in test_results.items():
+                    if isinstance(value, dict):
+                        # Handle nested dictionaries
+                        for sub_metric, sub_value in value.items():
+                            significant = value.get('significant', 'N/A')
+                            writer.writerow([test_name, f"{metric}_{sub_metric}", sub_value, significant])
+                    else:
+                        # Direct metrics
+                        if metric == 'significant':
+                            significant = value
+                        else:
+                            significant = 'N/A'
+                        writer.writerow([test_name, metric, value, significant])
+        
 
 ##############################################################################
 # 9) Single Author Analysis
@@ -1907,7 +2298,7 @@ def analyze_author_network(rolap_conn, impact_conn, author_id, output_prefix, sc
     
     # Step 1: Load data
     bad_authors = load_bad_authors(rolap_conn, schema)
-    publication_years = load_publication_years(rolap_conn, schema)
+    publication_years = load_publication_years(impact_conn, schema)  # Changed to impact_conn
     author_metrics = load_author_metrics(rolap_conn, schema)
     orcid_to_works, work_to_authors = load_work_author_mappings(rolap_conn, schema)
     work_to_cited, citation_years = load_citation_data(impact_conn, schema)
@@ -1933,16 +2324,37 @@ def analyze_author_network(rolap_conn, impact_conn, author_id, output_prefix, sc
                 f.write(f"Density: {nx.density(graph):.6f}\n")
                 f.write(f"Bad authors in network: {sum(1 for n in graph.nodes() if n in bad_authors)}\n")
                 f.write(f"Fraction of bad authors: {sum(1 for n in graph.nodes() if n in bad_authors) / graph.number_of_nodes():.4f}\n")
+                
+                # Add publication year statistics if available
+                if publication_years:
+                    # Get years for works authored by this author
+                    author_works = orcid_to_works.get(author_id, [])
+                    author_years = [publication_years.get(work_id) for work_id in author_works 
+                                   if work_id in publication_years]
+                    
+                    if author_years:
+                        f.write(f"\nPublication Years:\n")
+                        f.write(f"  Earliest: {min(author_years)}\n")
+                        f.write(f"  Latest: {max(author_years)}\n")
+                        f.write(f"  Count: {len(author_years)}\n")
+                        
+                        # Calculate publication frequency by year
+                        from collections import Counter
+                        year_counts = Counter(author_years)
+                        f.write(f"\nPublications by Year:\n")
+                        for year in sorted(year_counts.keys()):
+                            f.write(f"  {year}: {year_counts[year]}\n")
     except Exception as e:
         print(f"[WARNING] Could not save graph metrics: {e}")
     
+    # Pass publication years to functions that can utilize them
     # Step 3: Find suspicious cliques
     suspicious_cliques = find_suspicious_cliques(graph, bad_authors)
     
     # Step 4: Find citation rings
     citation_rings = find_citation_rings(graph, bad_authors)
     
-    # Step 5: Analyze author citation behavior
+    # Step 5: Analyze author citation behavior with publication years
     author_analysis = analyze_author_citation_behavior(graph, bad_authors, author_metrics)
     
     # Step 6: Generate visualizations
@@ -1993,6 +2405,7 @@ def batch_analyze_authors(rolap_conn, impact_conn, schema, num_pairs=5):
     
     # Step 1: Load data
     bad_authors = load_bad_authors(rolap_conn, schema)
+    publication_years = load_publication_years(impact_conn, schema)  # Changed to impact_conn
     orcid_to_works, work_to_authors = load_work_author_mappings(rolap_conn, schema)
     work_to_cited, citation_years = load_citation_data(impact_conn, schema)
     author_pairs = load_author_pairs(rolap_conn, schema, num_pairs)
@@ -2004,11 +2417,59 @@ def batch_analyze_authors(rolap_conn, impact_conn, schema, num_pairs=5):
     # Step 2: Prepare results collection
     results = []
     
+    # Prepare data structures for statistical analysis
+    all_bottom_clique_counts = []
+    all_random_clique_counts = []
+    all_bottom_ring_counts = []
+    all_random_ring_counts = []
+    
+    bottom_clique_properties = {
+        'size': [], 'density': [], 'bad_fraction': [], 
+        'avg_edge_weight': [], 'reciprocity': []
+    }
+    
+    random_clique_properties = {
+        'size': [], 'density': [], 'bad_fraction': [], 
+        'avg_edge_weight': [], 'reciprocity': []
+    }
+    
+    bottom_ring_properties = {
+        'size': [], 'bad_fraction': [], 'avg_edge_weight': [], 
+        'weight_consistency': []
+    }
+    
+    random_ring_properties = {
+        'size': [], 'bad_fraction': [], 'avg_edge_weight': [], 
+        'weight_consistency': []
+    }
+    
+    all_bottom_authors = []
+    all_random_authors = []
+    combined_graph = nx.DiGraph()
+    
+    # Add temporal analysis structures
+    bottom_publication_years = {}
+    random_publication_years = {}
+    
     # Step 3: Process each author pair
     for pair_idx, (bottom_orcid, random_orcid, total_works) in enumerate(author_pairs, 1):
         print(f"\n[INFO] Processing pair #{pair_idx}: {bottom_orcid} (BOTTOM) vs {random_orcid} (RANDOM)")
         
         pair_results = {}
+        all_bottom_authors.append(bottom_orcid)
+        all_random_authors.append(random_orcid)
+        
+        # Extract publication years for both authors
+        bottom_works = orcid_to_works.get(bottom_orcid, [])
+        random_works = orcid_to_works.get(random_orcid, [])
+        
+        bottom_years = [publication_years.get(work_id) for work_id in bottom_works 
+                       if work_id in publication_years]
+        random_years = [publication_years.get(work_id) for work_id in random_works 
+                       if work_id in publication_years]
+        
+        bottom_publication_years[bottom_orcid] = bottom_years
+        random_publication_years[random_orcid] = random_years
         
         # Analyze each author in the pair
         for author_id, category in [(bottom_orcid, "BOTTOM"), (random_orcid, "RANDOM")]:
@@ -2025,10 +2486,44 @@ def batch_analyze_authors(rolap_conn, impact_conn, schema, num_pairs=5):
                 citation_years
             )
             
+            # Add to combined graph for global analysis
+            combined_graph.add_nodes_from(graph.nodes())
+            combined_graph.add_edges_from(graph.edges(data=True))
+            
             # Find suspicious patterns
             suspicious_cliques = find_suspicious_cliques(graph, bad_authors)
             citation_rings = find_citation_rings(graph, bad_authors)
             author_analysis = analyze_author_citation_behavior(graph, bad_authors)
+            
+            # Update statistical data structures
+            if category == "BOTTOM":
+                all_bottom_clique_counts.append(len(suspicious_cliques))
+                all_bottom_ring_counts.append(len(citation_rings))
+                
+                # Collect properties for Mann-Whitney U test
+                for clique in suspicious_cliques:
+                    for prop in bottom_clique_properties:
+                        if prop in clique:
+                            bottom_clique_properties[prop].append(clique[prop])
+                
+                for ring in citation_rings:
+                    for prop in bottom_ring_properties:
+                        if prop in ring:
+                            bottom_ring_properties[prop].append(ring[prop])
+            else:
+                all_random_clique_counts.append(len(suspicious_cliques))
+                all_random_ring_counts.append(len(citation_rings))
+                
+                # Collect properties for Mann-Whitney U test
+                for clique in suspicious_cliques:
+                    for prop in random_clique_properties:
+                        if prop in clique:
+                            random_clique_properties[prop].append(clique[prop])
+                
+                for ring in citation_rings:
+                    for prop in random_ring_properties:
+                        if prop in ring:
+                            random_ring_properties[prop].append(ring[prop])
             
             # Compute summary metrics
             bad_node_count = sum(1 for n in graph.nodes() if n in bad_authors)
@@ -2049,8 +2544,33 @@ def batch_analyze_authors(rolap_conn, impact_conn, schema, num_pairs=5):
                 "top_ring_score": citation_rings[0]['anomaly_score'] if citation_rings else 0
             }
             
+            # Add temporal metrics
+            author_years = bottom_years if category == "BOTTOM" else random_years
+            if author_years:
+                network_metrics["publication_years"] = len(author_years)
+                network_metrics["earliest_year"] = min(author_years)
+                network_metrics["latest_year"] = max(author_years)
+                network_metrics["publication_span"] = max(author_years) - min(author_years) if len(author_years) > 1 else 0
+            
             # Save visualization for this author
             output_prefix = f"pair{pair_idx}_{category}_{author_id}"
+            
+            # Save publication year information
+            try:
+                if author_years:
+                    with open(f"{OUTPUT_DIR}/{output_prefix}_publication_years.txt", 'w') as f:
+                        f.write(f"Author: {author_id} ({category})\n")
+                        f.write(f"Number of works with year data: {len(author_years)}\n")
+                        f.write(f"Publication span: {min(author_years)} - {max(author_years)}\n")
+                        
+                        # Calculate year distribution
+                        from collections import Counter
+                        year_counts = Counter(author_years)
+                        f.write("\nPublications by year:\n")
+                        for year in sorted(year_counts.keys()):
+                            f.write(f"{year}: {year_counts[year]}\n")
+            except Exception as e:
+                print(f"[WARNING] Could not save publication year data: {e}")
             
             # Visualize network overview
             if author_analysis:
@@ -2112,9 +2632,417 @@ def batch_analyze_authors(rolap_conn, impact_conn, schema, num_pairs=5):
     # Save comparative report
     save_comparative_analysis(results, f"{OUTPUT_DIR}/comparative_analysis.csv")
     
+    # Step 4: Perform statistical analysis after all pairs are processed
+    print("[INFO] Performing statistical analysis on collected data...")
+    
+    statistical_results = {}
+    
+    # 1. Bootstrap confidence intervals for clique and ring counts
+    clique_counts = {
+        'bottom': all_bottom_clique_counts,
+        'random': all_random_clique_counts
+    }
+    
+    ring_counts = {
+        'bottom': all_bottom_ring_counts,
+        'random': all_random_ring_counts
+    }
+    
+    ci_cliques = bootstrap_citation_pattern(clique_counts)
+    ci_rings = bootstrap_citation_pattern(ring_counts)
+    
+    statistical_results['bootstrap_cliques'] = {
+        'bottom_ci': ci_cliques[0],
+        'random_ci': ci_cliques[1],
+        'significant': ci_cliques[2]
+    }
+    
+    statistical_results['bootstrap_rings'] = {
+        'bottom_ci': ci_rings[0],
+        'random_ci': ci_rings[1],
+        'significant': ci_rings[2]
+    }
+    
+    # 2. Mann-Whitney U tests for clique and ring properties
+    mw_clique_results = compare_pattern_properties(bottom_clique_properties, random_clique_properties)
+    mw_ring_results = compare_pattern_properties(bottom_ring_properties, random_ring_properties)
+    
+    statistical_results['mannwhitney_clique_properties'] = mw_clique_results
+    statistical_results['mannwhitney_ring_properties'] = mw_ring_results
+    
+    # 3. Self-citation analysis
+    self_citation_results = self_citation_analysis(
+        all_bottom_authors, all_random_authors, combined_graph
+    )
+    statistical_results['self_citation_analysis'] = self_citation_results
+    
+    # 4. Citation exchange analysis
+    exchange_results = citation_exchange_analysis(combined_graph, bad_authors)
+    statistical_results['citation_exchange_analysis'] = exchange_results
+    
+    # 5. Ring temporal pattern analysis
+    temporal_results = analyze_ring_temporal_patterns(results, citation_years)
+    statistical_results['ring_temporal_analysis'] = temporal_results
+    
+    # 6. Publication year comparison analysis
+    try:
+        import numpy as np
+        from scipy.stats import mannwhitneyu
+        
+        # Flatten years for each group
+        bottom_all_years = [year for years in bottom_publication_years.values() for year in years if year]
+        random_all_years = [year for years in random_publication_years.values() for year in years if year]
+        
+        if bottom_all_years and random_all_years:
+            # Calculate basic statistics
+            temporal_results = {
+                'bottom_earliest': min(bottom_all_years),
+                'bottom_latest': max(bottom_all_years),
+                'bottom_median_year': np.median(bottom_all_years),
+                'bottom_year_span': max(bottom_all_years) - min(bottom_all_years),
+                'random_earliest': min(random_all_years),
+                'random_latest': max(random_all_years),
+                'random_median_year': np.median(random_all_years),
+                'random_year_span': max(random_all_years) - min(random_all_years),
+            }
+            
+            # Statistical test for year distribution
+            try:
+                u_stat, p_value = mannwhitneyu(bottom_all_years, random_all_years)
+                temporal_results['year_distribution_p_value'] = p_value
+                temporal_results['year_distribution_significant'] = p_value < 0.05
+            except Exception as e:
+                temporal_results['year_distribution_error'] = str(e)
+                
+            statistical_results['publication_year_analysis'] = temporal_results
+    except Exception as e:
+        print(f"[WARNING] Error in publication year analysis: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # 7. Network permutation test for clustering coefficient
+    # Create undirected graphs for bottom and random authors
+    bottom_graph = nx.Graph()
+    random_graph = nx.Graph()
+    
+    # Add edges for each author category
+    for result in results:
+        bottom_author = result["bottom_author"]
+        random_author = result["random_author"]
+        
+        # Get all neighbors from combined graph
+        for u, v, data in combined_graph.edges(data=True):
+            if u == bottom_author or v == bottom_author:
+                bottom_graph.add_edge(u, v)
+            if u == random_author or v == random_author:
+                random_graph.add_edge(u, v)
+    
+    # Perform permutation test on clustering coefficient
+    clustering_perm_p, clustering_diff = perform_network_permutation_test(
+        bottom_graph, random_graph, 
+        lambda g: nx.average_clustering(g) if g.number_of_nodes() > 1 else 0
+    )
+    
+    statistical_results['permutation_clustering'] = {
+        'p_value': clustering_perm_p,
+        'observed_diff': clustering_diff,
+        'significant': clustering_perm_p < 0.05
+    }
+    
+    # Save all statistical results
+    save_statistical_results(
+        statistical_results, 
+        f"{OUTPUT_DIR}/statistical_analysis.csv"
+    )
+    
     print(f"[INFO] Batch analysis complete for {len(results)} author pairs")
     return results
 
+def analyze_temporal_citation_patterns(graph, work_to_authors, publication_years, citation_years):
+    """
+    Analyze temporal patterns in citation network.
+    
+    Args:
+        graph: NetworkX directed graph of the citation network
+        work_to_authors: Dictionary mapping work IDs to author ORCIDs
+        publication_years: Dictionary mapping work IDs to publication years
+        citation_years: Dictionary mapping (source_id, target_id) to citation years
+        
+    Returns:
+        dict: Temporal analysis metrics
+    """
+    import numpy as np
+    from collections import defaultdict
+    
+    # Initialize metrics
+    temporal_metrics = {
+        'citation_age': [],  # Years between publication and citation
+        'citation_speed': defaultdict(list),  # Speed of citations by author
+        'citation_span': [],  # Publication year range for citations
+        'self_citation_age': [],  # Age of self-citations
+        'other_citation_age': [],  # Age of non-self citations
+    }
+    
+    # Analyze each edge in the graph
+    for source, target, data in graph.edges(data=True):
+        # Extract citation relationships
+        for work_id, cited_work_id in data.get('citations', []):
+            # Skip if we don't have publication years for both works
+            if work_id not in publication_years or cited_work_id not in publication_years:
+                continue
+                
+            source_year = publication_years[work_id]
+            target_year = publication_years[cited_work_id]
+            
+            # Calculate citation age (how old was the paper when cited)
+            citation_age = source_year - target_year
+            temporal_metrics['citation_age'].append(citation_age)
+            
+            # Record by author for citation speed analysis
+            temporal_metrics['citation_speed'][source].append(citation_age)
+            
+            # Check if this is a self-citation
+            source_authors = set(work_to_authors.get(work_id, []))
+            target_authors = set(work_to_authors.get(cited_work_id, []))
+            
+            # Check for author overlap (self-citation)
+            if source_authors.intersection(target_authors):
+                temporal_metrics['self_citation_age'].append(citation_age)
+            else:
+                temporal_metrics['other_citation_age'].append(citation_age)
+    
+    # Calculate aggregate metrics
+    results = {}
+    
+    if temporal_metrics['citation_age']:
+        results['median_citation_age'] = np.median(temporal_metrics['citation_age'])
+        results['mean_citation_age'] = np.mean(temporal_metrics['citation_age'])
+        results['recent_citation_pct'] = sum(1 for age in temporal_metrics['citation_age'] if age <= 2) / len(temporal_metrics['citation_age']) * 100
+        
+    if temporal_metrics['self_citation_age'] and temporal_metrics['other_citation_age']:
+        results['median_self_citation_age'] = np.median(temporal_metrics['self_citation_age'])
+        results['median_other_citation_age'] = np.median(temporal_metrics['other_citation_age'])
+        results['self_vs_other_diff'] = results['median_self_citation_age'] - results['median_other_citation_age']
+    
+    # Calculate citation speed by author (lower values mean faster citations)
+    author_citation_speeds = {}
+    for author, ages in temporal_metrics['citation_speed'].items():
+        if len(ages) >= 3:  # Only consider authors with enough citations
+            author_citation_speeds[author] = np.median(ages)
+    
+    # Get fastest citers (potentially suspicious)
+    if author_citation_speeds:
+        fastest_citers = sorted(author_citation_speeds.items(), key=lambda x: x[1])[:5]
+        results['fastest_citers'] = fastest_citers
+    
+    return results
+
+
+def visualize_temporal_patterns(publication_years, citation_years, author_id, output_path):
+    """
+    Create visualizations for temporal citation patterns.
+    
+    Args:
+        publication_years: Dictionary mapping work IDs to publication years
+        citation_years: Dictionary mapping (source_id, target_id) to citation years
+        author_id: ORCID of the author being analyzed
+        output_path: Path to save the visualization
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from collections import Counter
+    
+    # Create figure with multiple subplots
+    fig, axs = plt.subplots(2, 2, figsize=(15, 12))
+    
+    # 1. Publication years histogram
+    pub_years = [year for work_id, year in publication_years.items()]
+    if pub_years:
+        axs[0, 0].hist(pub_years, bins=min(20, len(set(pub_years))), alpha=0.7, color='blue')
+        axs[0, 0].set_title('Publication Year Distribution')
+        axs[0, 0].set_xlabel('Year')
+        axs[0, 0].set_ylabel('Number of Publications')
+        
+        # Add a vertical line for median
+        median_year = np.median(pub_years)
+        axs[0, 0].axvline(x=median_year, color='red', linestyle='--', 
+                         label=f'Median: {median_year:.1f}')
+        axs[0, 0].legend()
+    
+    # 2. Citation age histogram
+    citation_ages = []
+    for (source_id, target_id), cite_year in citation_years.items():
+        if source_id in publication_years and target_id in publication_years:
+            citation_age = publication_years[source_id] - publication_years[target_id]
+            citation_ages.append(citation_age)
+    
+    if citation_ages:
+        axs[0, 1].hist(citation_ages, bins=min(20, len(set(citation_ages))), alpha=0.7, color='green')
+        axs[0, 1].set_title('Citation Age Distribution')
+        axs[0, 1].set_xlabel('Age of Cited Work (Years)')
+        axs[0, 1].set_ylabel('Number of Citations')
+        
+        # Add a vertical line for median
+        median_age = np.median(citation_ages)
+        axs[0, 1].axvline(x=median_age, color='red', linestyle='--', 
+                         label=f'Median Age: {median_age:.1f}')
+        axs[0, 1].legend()
+    
+    # 3. Publication frequency over time
+    if pub_years:
+        # Count publications per year
+        year_counts = Counter(pub_years)
+        years = sorted(year_counts.keys())
+        counts = [year_counts[year] for year in years]
+        
+        # Create the line plot
+        axs[1, 0].plot(years, counts, marker='o', linestyle='-', color='purple')
+        axs[1, 0].set_title('Publication Frequency Over Time')
+        axs[1, 0].set_xlabel('Year')
+        axs[1, 0].set_ylabel('Number of Publications')
+        
+        # Add trend line
+        if len(years) > 1:
+            z = np.polyfit(years, counts, 1)
+            p = np.poly1d(z)
+            axs[1, 0].plot(years, p(years), "r--", 
+                          label=f'Trend: {"+" if z[0]>0 else ""}{z[0]:.2f}/year')
+            axs[1, 0].legend()
+    
+    # 4. Citation network growth over time
+    if citation_years:
+        # Extract and sort years
+        cite_years = sorted(citation_years.values())
+        year_counts = Counter(cite_years)
+        years = sorted(year_counts.keys())
+        counts = [year_counts[year] for year in years]
+        
+        # Calculate cumulative counts
+        cumulative = np.cumsum(counts)
+        
+        # Create the line plot
+        axs[1, 1].plot(years, cumulative, marker='o', linestyle='-', color='orange')
+        axs[1, 1].set_title('Cumulative Citation Network Growth')
+        axs[1, 1].set_xlabel('Year')
+        axs[1, 1].set_ylabel('Cumulative Number of Citations')
+    
+    # Add a super title
+    plt.suptitle(f'Temporal Analysis for Author: {author_id}', fontsize=16)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])  # Adjust layout to make room for suptitle
+    
+    # Save the figure
+    try:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"[INFO] Saved temporal analysis visualization to {output_path}")
+    except Exception as e:
+        print(f"[WARNING] Could not save visualization: {e}")
+        
+    plt.close()
+
+
+def analyze_citation_bursts(publication_years, citation_years, author_id, output_path=None):
+    """
+    Analyze citation pattern bursts to detect potentially suspicious activity.
+    
+    Args:
+        publication_years: Dictionary mapping work IDs to publication years
+        citation_years: Dictionary mapping (source_id, target_id) to citation years
+        author_id: ORCID of the author being analyzed
+        output_path: Optional path to save visualization
+        
+    Returns:
+        dict: Burst analysis metrics
+    """
+    import numpy as np
+    from collections import defaultdict, Counter
+    import matplotlib.pyplot as plt
+    
+    # Organize citations by year
+    citations_by_year = defaultdict(int)
+    
+    # For each citation, if we have the publication year, count it
+    for (source_id, target_id), cite_year in citation_years.items():
+        if source_id in publication_years:
+            citations_by_year[publication_years[source_id]] += 1
+    
+    # Skip if we don't have enough data
+    if len(citations_by_year) < 3:
+        return {'error': 'Not enough citation year data'}
+    
+    # Get years and counts
+    years = sorted(citations_by_year.keys())
+    counts = [citations_by_year[year] for year in years]
+    
+    # Calculate moving average and standard deviation (window of 3 years)
+    window = 3
+    ma_counts = []
+    std_counts = []
+    burst_scores = []
+    
+    for i in range(len(counts)):
+        # Get window indexes ensuring we don't go out of bounds
+        start_idx = max(0, i - window + 1)
+        end_idx = i + 1
+        window_counts = counts[start_idx:end_idx]
+        
+        # Calculate stats
+        ma = np.mean(window_counts)
+        std = np.std(window_counts) if len(window_counts) > 1 else 0
+        
+        ma_counts.append(ma)
+        std_counts.append(std)
+        
+        # Calculate burst score (how many std deviations above moving average)
+        burst_score = (counts[i] - ma) / std if std > 0 else 0
+        burst_scores.append(burst_score)
+    
+    # Identify burst years (years with burst score > 2)
+    burst_years = [years[i] for i in range(len(years)) if burst_scores[i] > 2]
+    burst_intensities = [burst_scores[i] for i in range(len(years)) if burst_scores[i] > 2]
+    
+    # Calculate metrics
+    results = {
+        'burst_count': len(burst_years),
+        'burst_years': burst_years,
+        'burst_intensities': burst_intensities,
+        'max_burst_intensity': max(burst_scores) if burst_scores else 0,
+        'suspicious': len(burst_years) >= 2  # Consider suspicious if multiple bursts
+    }
+    
+    # Create visualization if output path is provided
+    if output_path:
+        plt.figure(figsize=(12, 8))
+        
+        # Plot citation counts
+        plt.bar(years, counts, alpha=0.7, color='blue', label='Citation Count')
+        
+        # Plot moving average
+        plt.plot(years, ma_counts, 'r-', label=f'{window}-Year Moving Average')
+        
+        # Highlight burst years
+        for year, intensity in zip(burst_years, burst_intensities):
+            plt.axvline(x=year, color='red', alpha=0.3)
+            plt.annotate(f'Burst: {intensity:.1f}σ', 
+                        xy=(year, max(counts)*0.9), 
+                        xytext=(year, max(counts)*0.9),
+                        ha='center')
+        
+        plt.title(f'Citation Pattern Analysis for Author: {author_id}')
+        plt.xlabel('Year')
+        plt.ylabel('Number of Citations')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Save the figure
+        try:
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            print(f"[INFO] Saved citation burst analysis to {output_path}")
+        except Exception as e:
+            print(f"[WARNING] Could not save visualization: {e}")
+            
+        plt.close()
+    
+    return results
 
 ##############################################################################
 # 11) Main Function
@@ -2135,8 +3063,258 @@ def main():
             OUTPUT_DIR.mkdir(parents=True)
             print(f"[INFO] Created output directory: {OUTPUT_DIR}")
         
+        # Load data for analysis
+        print("[INFO] Loading data for analysis...")
+        bad_authors = load_bad_authors(rolap_conn, schema)
+        orcid_to_works, work_to_authors = load_work_author_mappings(rolap_conn, schema)
+        work_to_cited, citation_years = load_citation_data(impact_conn, schema)
+        publication_years = load_publication_years(impact_conn, schema)  # Use impact_conn
+        author_metrics = load_author_metrics(rolap_conn, schema)
+        
         # Run batch analysis for multiple authors
         batch_results = batch_analyze_authors(rolap_conn, impact_conn, schema, num_pairs=5)
+        
+        # Add temporal analysis for each author if we have results
+        if batch_results:
+            # Create a directory for temporal analysis
+            temporal_dir = Path(f"{OUTPUT_DIR}/temporal_analysis")
+            if not temporal_dir.exists():
+                temporal_dir.mkdir()
+                print(f"[INFO] Created directory for temporal analysis: {temporal_dir}")
+            
+            print("[INFO] Performing temporal analysis for all authors...")
+            temporal_metrics = {}
+            
+            for result in batch_results:
+                # Process bottom author
+                bottom_author = result["bottom_author"]
+                try:
+                    # Build citation network for bottom author
+                    bottom_graph = build_citation_network(
+                        bottom_author, 
+                        DEFAULT_DEPTH,
+                        MAX_BFS_NODES,
+                        orcid_to_works, 
+                        work_to_authors, 
+                        work_to_cited,
+                        citation_years
+                    )
+                    
+                    # Analyze temporal citation patterns
+                    bottom_metrics = analyze_temporal_citation_patterns(
+                        bottom_graph, 
+                        work_to_authors, 
+                        publication_years, 
+                        citation_years
+                    )
+                    
+                    # Create visualizations
+                    visualize_temporal_patterns(
+                        publication_years,
+                        citation_years,
+                        bottom_author,
+                        f"{temporal_dir}/BOTTOM_{bottom_author}_temporal.png"
+                    )
+                    
+                    # Analyze citation bursts
+                    burst_metrics = analyze_citation_bursts(
+                        publication_years,
+                        citation_years,
+                        bottom_author,
+                        f"{temporal_dir}/BOTTOM_{bottom_author}_bursts.png"
+                    )
+                    
+                    # Store metrics
+                    temporal_metrics[f"BOTTOM_{bottom_author}"] = {
+                        "temporal": bottom_metrics,
+                        "bursts": burst_metrics
+                    }
+                except Exception as e:
+                    print(f"[WARNING] Could not complete temporal analysis for BOTTOM author {bottom_author}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                
+                # Process random author
+                random_author = result["random_author"]
+                try:
+                    # Build citation network for random author
+                    random_graph = build_citation_network(
+                        random_author, 
+                        DEFAULT_DEPTH,
+                        MAX_BFS_NODES,
+                        orcid_to_works, 
+                        work_to_authors, 
+                        work_to_cited,
+                        citation_years
+                    )
+                    
+                    # Analyze temporal citation patterns
+                    random_metrics = analyze_temporal_citation_patterns(
+                        random_graph, 
+                        work_to_authors, 
+                        publication_years, 
+                        citation_years
+                    )
+                    
+                    # Create visualizations
+                    visualize_temporal_patterns(
+                        publication_years,
+                        citation_years,
+                        random_author,
+                        f"{temporal_dir}/RANDOM_{random_author}_temporal.png"
+                    )
+                    
+                    # Analyze citation bursts
+                    burst_metrics = analyze_citation_bursts(
+                        publication_years,
+                        citation_years,
+                        random_author,
+                        f"{temporal_dir}/RANDOM_{random_author}_bursts.png"
+                    )
+                    
+                    # Store metrics
+                    temporal_metrics[f"RANDOM_{random_author}"] = {
+                        "temporal": random_metrics,
+                        "bursts": burst_metrics
+                    }
+                except Exception as e:
+                    print(f"[WARNING] Could not complete temporal analysis for RANDOM author {random_author}: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # Save temporal metrics summary
+            try:
+                import json
+                with open(f"{temporal_dir}/temporal_metrics_summary.json", 'w') as f:
+                    json.dump(temporal_metrics, f, indent=4)
+                print(f"[INFO] Saved temporal metrics summary to {temporal_dir}/temporal_metrics_summary.json")
+                
+                # Create a readable summary
+                with open(f"{temporal_dir}/temporal_analysis_summary.txt", 'w') as f:
+                    f.write("TEMPORAL CITATION ANALYSIS SUMMARY\n")
+                    f.write("================================\n\n")
+                    
+                    # Compare burst patterns between bottom and random authors
+                    bottom_burst_count = sum(1 for k, v in temporal_metrics.items() 
+                                          if k.startswith("BOTTOM_") and 
+                                          v.get("bursts", {}).get("suspicious", False))
+                    
+                    random_burst_count = sum(1 for k, v in temporal_metrics.items() 
+                                          if k.startswith("RANDOM_") and 
+                                          v.get("bursts", {}).get("suspicious", False))
+                    
+                    f.write(f"Bottom Authors with Suspicious Citation Bursts: {bottom_burst_count}\n")
+                    f.write(f"Random Authors with Suspicious Citation Bursts: {random_burst_count}\n\n")
+                    
+                    # List authors with suspicious burst patterns
+                    f.write("Authors with Suspicious Citation Burst Patterns:\n")
+                    for author_key, metrics in temporal_metrics.items():
+                        if metrics.get("bursts", {}).get("suspicious", False):
+                            burst_years = metrics.get("bursts", {}).get("burst_years", [])
+                            burst_intensities = metrics.get("bursts", {}).get("burst_intensities", [])
+                            
+                            f.write(f"  {author_key}:\n")
+                            f.write(f"    - Burst Years: {', '.join(str(y) for y in burst_years)}\n")
+                            f.write(f"    - Burst Intensities: {', '.join(f'{i:.1f}σ' for i in burst_intensities)}\n")
+                            f.write(f"    - Max Burst Intensity: {metrics.get('bursts', {}).get('max_burst_intensity', 0):.1f}σ\n\n")
+                    
+                    # Compare citation ages
+                    f.write("Citation Age Analysis:\n")
+                    bottom_ages = [v.get("temporal", {}).get("median_citation_age", None) 
+                                for k, v in temporal_metrics.items() if k.startswith("BOTTOM_")]
+                    random_ages = [v.get("temporal", {}).get("median_citation_age", None) 
+                                for k, v in temporal_metrics.items() if k.startswith("RANDOM_")]
+                    
+                    bottom_ages = [age for age in bottom_ages if age is not None]
+                    random_ages = [age for age in random_ages if age is not None]
+                    
+                    if bottom_ages and random_ages:
+                        import numpy as np
+                        bottom_median = np.median(bottom_ages)
+                        random_median = np.median(random_ages)
+                        
+                        f.write(f"  Bottom Authors - Median Citation Age: {bottom_median:.1f} years\n")
+                        f.write(f"  Random Authors - Median Citation Age: {random_median:.1f} years\n")
+                        
+                        if bottom_median < random_median:
+                            f.write(f"  NOTE: Bottom authors tend to cite more recent work ({bottom_median:.1f} vs {random_median:.1f} years),\n")
+                            f.write(f"        which could indicate strategic citation behavior.\n\n")
+                    
+                    # Compare self-citation patterns
+                    f.write("Self-Citation Analysis:\n")
+                    bottom_self_diff = [v.get("temporal", {}).get("self_vs_other_diff", None) 
+                                     for k, v in temporal_metrics.items() if k.startswith("BOTTOM_")]
+                    random_self_diff = [v.get("temporal", {}).get("self_vs_other_diff", None) 
+                                     for k, v in temporal_metrics.items() if k.startswith("RANDOM_")]
+                    
+                    bottom_self_diff = [diff for diff in bottom_self_diff if diff is not None]
+                    random_self_diff = [diff for diff in random_self_diff if diff is not None]
+                    
+                    if bottom_self_diff and random_self_diff:
+                        bottom_avg_diff = np.mean(bottom_self_diff)
+                        random_avg_diff = np.mean(random_self_diff)
+                        
+                        f.write(f"  Bottom Authors - Self vs. Other Citation Age Difference: {bottom_avg_diff:.1f} years\n")
+                        f.write(f"  Random Authors - Self vs. Other Citation Age Difference: {random_avg_diff:.1f} years\n")
+                        
+                        if bottom_avg_diff < random_avg_diff:
+                            f.write(f"  NOTE: Bottom authors tend to self-cite more recent work compared to other citations\n")
+                            f.write(f"        ({bottom_avg_diff:.1f} vs {random_avg_diff:.1f} years difference), which could indicate\n")
+                            f.write(f"        strategic self-citation to boost metrics.\n\n")
+                    
+                    f.write("\nRECOMMENDATIONS:\n")
+                    f.write("1. Authors with multiple high-intensity citation bursts should be investigated further.\n")
+                    f.write("2. Authors with significant differences between self-citation age and other-citation age\n")
+                    f.write("   may be strategically self-citing to boost metrics.\n")
+                    f.write("3. Authors who predominantly cite very recent work compared to their peers may be\n")
+                    f.write("   engaging in strategic citation behavior.\n")
+                
+                print(f"[INFO] Saved temporal analysis summary to {temporal_dir}/temporal_analysis_summary.txt")
+            except Exception as e:
+                print(f"[WARNING] Could not save temporal metrics summary: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # Report key statistical findings
+        try:
+            with open(f"{OUTPUT_DIR}/statistical_summary.txt", 'w') as f:
+                f.write("CITATION NETWORK STATISTICAL ANALYSIS SUMMARY\n")
+                f.write("===========================================\n\n")
+                
+                # Attempt to read and summarize the statistical results
+                import csv
+                significant_findings = []
+                
+                try:
+                    with open(f"{OUTPUT_DIR}/statistical_analysis.csv", 'r') as stats_file:
+                        reader = csv.reader(stats_file)
+                        next(reader)  # Skip header
+                        for row in reader:
+                            if len(row) >= 4 and row[3].lower() == 'true':
+                                test = row[0]
+                                metric = row[1]
+                                value = row[2]
+                                significant_findings.append((test, metric, value))
+                except:
+                    pass
+                
+                if significant_findings:
+                    f.write("Significant Statistical Findings:\n")
+                    for test, metric, value in significant_findings:
+                        f.write(f"- {test}: {metric} = {value}\n")
+                else:
+                    f.write("No statistically significant findings were detected.\n")
+                    f.write("This may be due to sample size limitations or weakness in the patterns.\n")
+                
+                f.write("\nRecommendations:\n")
+                f.write("1. Further investigation is needed for authors with high ring or clique counts.\n")
+                f.write("2. Temporal analysis may reveal coordinated citation behavior.\n")
+                f.write("3. Self-citation and exchange ratio analysis can identify additional suspicious patterns.\n")
+                
+                # Add new recommendation about temporal patterns
+                f.write("4. Citation burst patterns and abnormal citation ages may indicate citation manipulation.\n")
+        except Exception as e:
+            print(f"[WARNING] Could not generate statistical summary: {e}")
         
         # Perform deeper analysis on the most suspicious author if we have results
         if batch_results:
@@ -2156,6 +3334,85 @@ def main():
                     "deep_analysis",
                     schema
                 )
+                
+                # Add detailed temporal analysis for this author
+                try:
+                    # Additional detailed temporal analysis for most suspicious author
+                    print(f"[INFO] Performing detailed temporal analysis for suspicious author: {bottom_author}")
+                    
+                    # Build more expanded network for this author
+                    expanded_graph = build_citation_network(
+                        bottom_author, 
+                        DEFAULT_DEPTH + 1,  # Deeper exploration
+                        MAX_BFS_NODES * 2,  # More nodes
+                        orcid_to_works, 
+                        work_to_authors, 
+                        work_to_cited,
+                        citation_years
+                    )
+                    
+                    # Run temporal analysis
+                    temporal_metrics = analyze_temporal_citation_patterns(
+                        expanded_graph,
+                        work_to_authors,
+                        publication_years,
+                        citation_years
+                    )
+                    
+                    # More detailed visualizations
+                    visualize_temporal_patterns(
+                        publication_years,
+                        citation_years,
+                        bottom_author,
+                        f"{OUTPUT_DIR}/deep_analysis_temporal.png"
+                    )
+                    
+                    # Burst analysis
+                    burst_metrics = analyze_citation_bursts(
+                        publication_years,
+                        citation_years,
+                        bottom_author,
+                        f"{OUTPUT_DIR}/deep_analysis_bursts.png"
+                    )
+                    
+                    # Save the detailed findings
+                    with open(f"{OUTPUT_DIR}/deep_analysis_temporal.txt", 'w') as f:
+                        f.write(f"DETAILED TEMPORAL ANALYSIS FOR {bottom_author}\n")
+                        f.write("===========================================\n\n")
+                        
+                        f.write("Temporal Citation Patterns:\n")
+                        for key, value in temporal_metrics.items():
+                            if isinstance(value, (int, float)):
+                                f.write(f"  {key}: {value:.2f}\n")
+                            else:
+                                f.write(f"  {key}: {value}\n")
+                        
+                        f.write("\nCitation Burst Analysis:\n")
+                        for key, value in burst_metrics.items():
+                            if key == 'burst_years':
+                                f.write(f"  Burst Years: {', '.join(str(y) for y in value)}\n")
+                            elif key == 'burst_intensities':
+                                f.write(f"  Burst Intensities: {', '.join(f'{i:.1f}σ' for i in value)}\n")
+                            elif isinstance(value, (int, float)):
+                                f.write(f"  {key}: {value:.2f}\n")
+                            else:
+                                f.write(f"  {key}: {value}\n")
+                        
+                        # Add interpretation
+                        f.write("\nInterpretation:\n")
+                        if burst_metrics.get('suspicious', False):
+                            f.write("  This author shows suspicious citation burst patterns that may indicate\n")
+                            f.write("  coordinated citation behavior or strategic citation manipulation.\n")
+                        else:
+                            f.write("  This author's citation patterns appear normal from a temporal perspective.\n")
+                        
+                        if temporal_metrics.get('self_vs_other_diff', 0) < -1:
+                            f.write("\n  The author shows a pattern of citing their own work more quickly than\n")
+                            f.write("  the work of others, which could indicate strategic self-citation.\n")
+                except Exception as e:
+                    print(f"[WARNING] Could not perform detailed temporal analysis: {e}")
+                    import traceback
+                    traceback.print_exc()
             except (ValueError, KeyError) as e:
                 print(f"[WARNING] Could not select most suspicious author: {e}")
         
@@ -2168,6 +3425,6 @@ def main():
     except Exception as e:
         print(f"[ERROR] An error occurred: {e}")
         traceback.print_exc()
-
+        
 if __name__ == "__main__":
     main()
