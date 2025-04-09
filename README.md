@@ -33,7 +33,7 @@ Install at the desired path with the following command:
 aria2c http://dx.doi.org/XXX/XXX &&
 ```
 
-Then for convenience, rename the directory`:
+Then for convenience, rename the directory:
 
 ```bash
 mv 'April 2024 Public Data File from Crossref' Crossref-April-2024
