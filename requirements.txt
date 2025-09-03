@@ -1,0 +1,8 @@
+pandas
+numpy
+networkx
+alexandria3k
+rdbunit
+seaborn
+scipy
+matplotlib
