@@ -18,6 +18,5 @@ populate: $(CROSSREF_DIR)
 	    work_references.doi work_references.work_id work_references.year \
 		works.issn_print works.issn_electronic \
 	    work_authors.work_id work_authors.orcid \
-	  --row-selection 'works.published_year BETWEEN 2019 AND 2023'
+	  --row-selection 'works.published_year BETWEEN 2020 AND 2024'
 	touch $@
-
