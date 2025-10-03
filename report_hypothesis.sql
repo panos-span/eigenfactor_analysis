@@ -1,0 +1,1 @@
+SELECT * FROM rolap.hypothesis_test_summary;

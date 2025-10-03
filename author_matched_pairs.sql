@@ -1,66 +1,78 @@
--- POST-CREATION INDEXES (for downstream scripts):
-CREATE INDEX IF NOT EXISTS rolap.idx_ap_matching ON author_profiles(author_tier, subject, papers_in_subject);
+-- PURPOSE: To create a large, high-quality, and representative set of matched
+-- pairs by matching a sample of case authors to control authors based on their
+-- subject-specific h5-index. This is the definitive, high-performance method.
+
+-- REQUIRED INDEXES ON SOURCE TABLES:
+-- ON rolap.author_profiles: idx_ap_orcid_subject, idx_ap_tier
+-- ON rolap.author_subject_h5_index: idx_ashi_orcid_subject
+
 CREATE INDEX IF NOT EXISTS rolap.idx_ap_orcid_subject ON author_profiles(orcid, subject);
+CREATE INDEX IF NOT EXISTS rolap.idx_ap_tier ON author_profiles(author_tier);
+CREATE INDEX IF NOT EXISTS rolap.idx_ashi_orcid_subject ON author_subject_h5_index(orcid, subject);
 
 CREATE TABLE rolap.author_matched_pairs AS
-WITH bottom_authors AS (
-    SELECT orcid, subject, papers_in_subject
-    FROM rolap.author_profiles WHERE author_tier = 'Bottom Tier'
-),
-control_authors AS (
-    SELECT orcid, subject, papers_in_subject
-    FROM rolap.author_profiles WHERE author_tier = 'Top Tier'
-),
--- STEP 1: For each case, find the BEST control candidate with MORE OR EQUAL papers.
-candidates_above AS (
+WITH
+-- Step 1: Enrich all authors with their h5-index.
+authors_enriched AS (
     SELECT
-        b.orcid as case_orcid, c.orcid as control_orcid,
-        b.papers_in_subject as case_papers, c.papers_in_subject as control_papers,
+        ap.orcid, ap.subject, ap.author_tier,
+        COALESCE(ashi.h5_index, 0) as h5_index
+    FROM rolap.author_profiles ap
+    JOIN rolap.author_subject_h5_index ashi ON ap.orcid = ashi.orcid AND ap.subject = ashi.subject
+    WHERE ap.author_tier IN ('Bottom Tier', 'Top Tier')
+),
+-- Step 2: Create a representative, pseudo-random SAMPLE of case authors and add their h5-bucket.
+bottom_authors_sampled AS (
+    SELECT orcid, subject, h5_index, CAST(h5_index / 3 AS INTEGER) as h5_bucket
+    FROM (
+        SELECT
+            orcid, subject, h5_index,
+            ROW_NUMBER() OVER (
+                PARTITION BY subject
+                ORDER BY substr(CAST(orcid AS TEXT) * 0.5453423837192382, length(CAST(orcid AS TEXT)) + 2)
+            ) as sample_rank
+        FROM authors_enriched
+        WHERE author_tier = 'Bottom Tier' AND h5_index > 0
+    )
+    -- This is the crucial sampling step.
+    WHERE sample_rank <= 2000 -- Take up to 2000 cases per subject.
+),
+-- Step 3: Create a bucketed table for the FULL population of control authors.
+control_authors_bucketed AS (
+    SELECT
+        orcid, subject, h5_index,
+        -- The bucket size (e.g., 3) is a tunable parameter.
+        CAST(h5_index / 3 AS INTEGER) as h5_bucket
+    FROM authors_enriched
+    WHERE author_tier = 'Top Tier' AND h5_index > 0
+),
+-- Step 4: Perform the FAST JOIN on the static buckets and then rank.
+ranked_matches AS (
+    SELECT
+        b.orcid as case_orcid,
+        c.orcid as control_orcid,
+        b.subject,
+        -- The ROW_NUMBER() is now applied to a much smaller, pre-filtered set.
         ROW_NUMBER() OVER (
             PARTITION BY b.orcid
-            ORDER BY c.papers_in_subject ASC -- Find the closest one above
-        ) as match_rank
-    FROM bottom_authors b
-    JOIN control_authors c ON b.subject = c.subject AND b.orcid != c.orcid
-    WHERE c.papers_in_subject >= b.papers_in_subject
-),
--- STEP 2: For each case, find the BEST control candidate with FEWER papers.
-candidates_below AS (
-    SELECT
-        b.orcid as case_orcid, c.orcid as control_orcid,
-        b.papers_in_subject as case_papers, c.papers_in_subject as control_papers,
-        ROW_NUMBER() OVER (
-            PARTITION BY b.orcid
-            ORDER BY c.papers_in_subject DESC -- Find the closest one below
-        ) as match_rank
-    FROM bottom_authors b
-    JOIN control_authors c ON b.subject = c.subject AND b.orcid != c.orcid
-    WHERE c.papers_in_subject < b.papers_in_subject
-),
--- STEP 3: Combine the single best candidate from above and below for each case.
-best_two_candidates AS (
-    SELECT * FROM candidates_above WHERE match_rank = 1
-    UNION ALL
-    SELECT * FROM candidates_below WHERE match_rank = 1
-),
--- STEP 4: From the two best candidates, select the one with the smallest
--- absolute difference in paper count.
-final_choice AS (
-    SELECT
-        case_orcid, control_orcid, case_papers, control_papers,
-        ROW_NUMBER() OVER (
-            PARTITION BY case_orcid
             ORDER BY
-                ABS(case_papers - control_papers) ASC, -- The primary sort key
-                -- Deterministic tie-breaker
-                substr(CAST(control_orcid AS TEXT) * 0.5453423837192382, length(CAST(control_orcid AS TEXT)) + 2) ASC
-        ) as final_rank
-    FROM best_two_candidates
+                -- Primary Sort Key: Find the absolute closest match within the candidate pool.
+                ABS(b.h5_index - c.h5_index) ASC,
+                -- Deterministic tie-breaker for reproducibility.
+                substr(CAST(c.orcid AS TEXT) * 0.5453423837192382, length(CAST(c.orcid AS TEXT)) + 2) ASC
+        ) as match_rank
+    FROM bottom_authors_sampled b
+    JOIN control_authors_bucketed c
+            -- THE FAST EQUIJOIN: This is the core of the optimization.
+            -- The database can use a hash join on subject and h5_bucket, which is extremely fast.
+            ON b.subject = c.subject
+            -- We join on adjacent buckets to ensure we find the best match even if it's across a boundary.
+            AND c.h5_bucket BETWEEN (b.h5_bucket - 1) AND (b.h5_bucket + 1)
 )
+-- STEP 5: Select the single best match (rank=1) for each case author in our sample.
 SELECT
-    fc.case_orcid,
-    fc.control_orcid,
-    b.subject -- Join back to get the subject
-FROM final_choice fc
-JOIN bottom_authors b ON fc.case_orcid = b.orcid
-WHERE final_rank = 1;
+    case_orcid,
+    control_orcid,
+    subject
+FROM ranked_matches
+WHERE match_rank = 1;
